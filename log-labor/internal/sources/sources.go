@@ -6,6 +6,7 @@ package sources
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -227,9 +228,22 @@ func CollectAll(srcs []Source, win func(Source) Window, fromMs, toMs int64, days
 // buckets over the fetch range, plus whole-life MIN/MAX per session
 // (the 72h rule needs the true span, not just what the range sees).
 // ms epoch in/out.
+//
+// Schema generations: opencode ≥ 2.0 renamed session→session_v2 and
+// message→session_message (same db file), and its migration COPIES the
+// old rows across — v2 is a superset, so reading both would
+// double-count. v2 wins when present; v1 (session + message) is the
+// pre-2.0 fallback. session_message rows also carry harness noise
+// (system/synthetic/idle/compaction) that v1's message table never
+// held — only real user/assistant rows count.
 func CollectOpencode(db string, win Window, fromMs, toMs int64) ([]Session, error) {
 	if _, err := os.Stat(db); err != nil {
 		return nil, fmt.Errorf("no store at %s", db)
+	}
+	msgs, sess, noise := "message", "session", ""
+	if hasV2Tables(db) {
+		msgs, sess = "session_message", "session_v2"
+		noise = " AND m.type IN ('user','assistant')"
 	}
 	// windowDay(ms) in SQL: shift back by window start AND +8h zone
 	// (SQLite % is UTC-anchored and C-style), take the +08 calendar
@@ -237,13 +251,17 @@ func CollectOpencode(db string, win Window, fromMs, toMs int64) ([]Session, erro
 	q := fmt.Sprintf(`SELECT MIN(m.time_created) AS t0, MAX(m.time_created) AS t1,
 		COUNT(*) AS msgs, m.session_id AS sid, s.directory AS dir, s.title AS title,
 		date((m.time_created - %d + 28800000)/1000, 'unixepoch') AS day
-		FROM message m JOIN session s ON s.id = m.session_id
-		WHERE m.time_created >= %d AND m.time_created < %d
+		FROM %s m JOIN %s s ON s.id = m.session_id
+		WHERE m.time_created >= %d AND m.time_created < %d%s
 		  AND ((m.time_created - %d + 28800000) %% 86400000 + 86400000) %% 86400000 < %d
 		GROUP BY m.session_id, day ORDER BY t0;`,
-		win.offsetMs(), fromMs, toMs, win.offsetMs(), win.lenMs())
-	spanQ := `SELECT session_id AS sid, MIN(time_created) AS g0, MAX(time_created) AS g1
-		FROM message GROUP BY session_id;`
+		win.offsetMs(), msgs, sess, fromMs, toMs, noise, win.offsetMs(), win.lenMs())
+	noiseWhere := ""
+	if noise != "" {
+		noiseWhere = " WHERE type IN ('user','assistant')"
+	}
+	spanQ := fmt.Sprintf(`SELECT session_id AS sid, MIN(time_created) AS g0, MAX(time_created) AS g1
+		FROM %s%s GROUP BY session_id;`, msgs, noiseWhere)
 	rowsJSON, err := exec.Command("sqlite3", "-json", "-readonly", db, q).Output()
 	if err != nil {
 		return nil, sqliteErr("collect", err)
@@ -261,7 +279,7 @@ func CollectOpencode(db string, win Window, fromMs, toMs int64) ([]Session, erro
 		Title string `json:"title"`
 		Day   string `json:"day"`
 	}
-	if err := json.Unmarshal(rowsJSON, &rows); err != nil {
+	if err := unmarshalJSONRows(rowsJSON, &rows); err != nil {
 		return nil, fmt.Errorf("parse sqlite output: %v", err)
 	}
 	var spans []struct {
@@ -269,7 +287,7 @@ func CollectOpencode(db string, win Window, fromMs, toMs int64) ([]Session, erro
 		G0  int64  `json:"g0"`
 		G1  int64  `json:"g1"`
 	}
-	if err := json.Unmarshal(spanJSON, &spans); err != nil {
+	if err := unmarshalJSONRows(spanJSON, &spans); err != nil {
 		return nil, fmt.Errorf("parse sqlite spans: %v", err)
 	}
 	type gspan struct{ start, span int64 }
@@ -291,6 +309,33 @@ func sqliteErr(what string, err error) error {
 		return fmt.Errorf("sqlite3 %s: %s", what, strings.TrimSpace(string(ee.Stderr)))
 	}
 	return fmt.Errorf("sqlite3 %s failed: %v", what, err)
+}
+
+// hasV2Tables — does this db carry the opencode ≥ 2.0 schema
+// (session_v2 + session_message)? One cheap sqlite_master read; any
+// surprise (no sqlite3, locked db, odd output) reads as "v1".
+func hasV2Tables(db string) bool {
+	out, err := exec.Command("sqlite3", "-json", "-readonly", db,
+		`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table'
+		 AND name IN ('session_v2','session_message');`).Output()
+	var rows []struct {
+		N int `json:"n"`
+	}
+	if err != nil || unmarshalJSONRows(out, &rows) != nil || len(rows) == 0 {
+		return false
+	}
+	return rows[0].N == 2
+}
+
+// unmarshalJSONRows — sqlite3 -json prints NOTHING (not []) for a
+// zero-row grouped query; empty output must read as "no rows", not a
+// parse error. (This exact quirk silently killed the 2026-10-12+
+// auto-daily runs: every source "skipped" → generic fallback row.)
+func unmarshalJSONRows(data []byte, v any) error {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil
+	}
+	return json.Unmarshal(data, v)
 }
 
 // CollectClaudeJSONL — Claude Code's per-project store: <root>/<munged-

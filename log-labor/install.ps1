@@ -25,7 +25,7 @@ if ($env:LOG_LABOR_VERSION) {
     $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/yyx462/AutoWecom-plugin/releases/latest' -TimeoutSec 10
     $Version = if ($rel.tag_name -match '^log-labor-(v[\d.]+)$') { $Matches[1] } else { $null }
   } catch { $Version = $null }
-  $Version = if ($Version) { $Version } else { 'v0.1.7' }
+  $Version = if ($Version) { $Version } else { 'v0.1.8' }
 }
 # win32-x64 is the only prebuilt target; it also runs on ARM64 Windows
 # via x64 emulation.
