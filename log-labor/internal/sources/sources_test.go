@@ -1,7 +1,9 @@
 package sources
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -239,6 +241,85 @@ func TestKnownFormats(t *testing.T) {
 	}
 	if _, err := Collect(Source{Format: "bogus", Path: "/nope"}, DefaultWindow(), 0, 0); err == nil || !strings.Contains(err.Error(), "unknown format") {
 		t.Error("bogus format must error with unknown format")
+	}
+}
+
+// fixtureDB — build a tiny opencode-style sqlite store via the real
+// sqlite3 CLI. family "v1" = session+message, "v2" =
+// session_v2+session_message; rows is raw SQL appended after the schema.
+func fixtureDB(t *testing.T, family, rows string) string {
+	t.Helper()
+	if _, err := exec.LookPath("sqlite3"); err != nil {
+		t.Skip("sqlite3 not available")
+	}
+	db := filepath.Join(t.TempDir(), "opencode.db")
+	schema := map[string]string{
+		"v1": `CREATE TABLE session (id text PRIMARY KEY, directory text NOT NULL, title text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL);
+CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL);`,
+		// v2: title nullable, session_message carries a type column
+		"v2": `CREATE TABLE session_v2 (id text PRIMARY KEY, directory text NOT NULL, title text, time_created integer NOT NULL, time_updated integer NOT NULL);
+CREATE TABLE session_message (id text PRIMARY KEY, session_id text NOT NULL, type text NOT NULL, time_created integer NOT NULL, time_updated integer NOT NULL);`,
+	}[family]
+	cmd := exec.Command("sqlite3", db)
+	cmd.Stdin = strings.NewReader(schema + rows)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("fixture db: %v\n%s", err, out)
+	}
+	return db
+}
+
+func TestCollectOpencodeV2AndFallback(t *testing.T) {
+	ten := msOf(t, "2026-09-11T10:00:00+08:00") // in-window
+	tenTen := msOf(t, "2026-09-11T10:10:00+08:00")
+	sep10 := msOf(t, "2026-09-10T00:00:00+08:00") // fetch range start
+
+	msg := func(id, sid, typ string, at int64) string {
+		return fmt.Sprintf("INSERT INTO session_message VALUES ('%s','%s','%s',%d,%d);\n", id, sid, typ, at, at)
+	}
+	db := fixtureDB(t, "v2",
+		fmt.Sprintf("INSERT INTO session_v2 VALUES ('ses_a','/p/A','V2 schema fix',%d,%d);\n", ten, tenTen)+
+			// real work: one user + one assistant…
+			msg("m1", "ses_a", "user", ten)+msg("m2", "ses_a", "assistant", tenTen)+
+			// …plus harness noise v1 never had — must not count
+			msg("m3", "ses_a", "system", msOf(t, "2026-09-11T10:05:00+08:00"))+
+			msg("m4", "ses_a", "idle", msOf(t, "2026-09-11T10:06:00+08:00")))
+	ss, err := CollectOpencode(db, DefaultWindow(), sep10, sep10+3*86_400_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ss) != 1 {
+		t.Fatalf("want 1 session, got %d: %+v", len(ss), ss)
+	}
+	s := ss[0]
+	if s.Msgs != 2 || s.Title != "V2 schema fix" || s.Dir != "/p/A" || s.Day != "2026-09-11" {
+		t.Errorf("v2 session wrong (noise must not count): %+v", s)
+	}
+	if s.Start != ten || s.End != tenTen || s.Span != 10*60_000 {
+		t.Errorf("v2 times/span wrong: %+v", s)
+	}
+
+	// v1-only store (pre-2.0 opencode): same shape, no type column
+	db1 := fixtureDB(t, "v1",
+		fmt.Sprintf("INSERT INTO session VALUES ('ses_b','/p/B','V1 fallback',%d,%d);\n", ten, tenTen)+
+			fmt.Sprintf("INSERT INTO message VALUES ('n1','ses_b',%d,%d);\n", ten, ten)+
+			fmt.Sprintf("INSERT INTO message VALUES ('n2','ses_b',%d,%d);\n", tenTen, tenTen))
+	ss, err = CollectOpencode(db1, DefaultWindow(), sep10, sep10+3*86_400_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ss) != 1 || ss[0].Msgs != 2 || ss[0].Title != "V1 fallback" {
+		t.Fatalf("v1 fallback broken: %+v err=%v", ss, err)
+	}
+
+	// THE regression: a day with zero rows must come back empty, not
+	// as a parse error (sqlite3 -json prints nothing for a zero-row
+	// grouped query — this killed the 2026-10-12+ auto-daily runs).
+	ss, err = CollectOpencode(db, DefaultWindow(), msOf(t, "2026-09-12T00:00:00+08:00"), msOf(t, "2026-09-13T00:00:00+08:00"))
+	if err != nil {
+		t.Fatalf("zero-row day must not error: %v", err)
+	}
+	if len(ss) != 0 {
+		t.Fatalf("zero-row day must return no sessions, got %+v", ss)
 	}
 }
 
