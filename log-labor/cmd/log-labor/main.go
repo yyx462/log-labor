@@ -142,6 +142,7 @@ func usage() {
                                   digest agent sessions per day, clipped to the work window
   log-labor daily sources list|add|remove|test    registry of session stores for collect
   log-labor daily set-window --start 09:00 --end 22:00   # global work window default
+  log-labor daily exclude list|add|remove        regexes dropped from every digest (personal work)
   log-labor daily fit "内容"=2.5 …|--total N      fit drafts to sum exactly N (default 8)
   log-labor upgrade                               # self-update: npm i -g … / install.sh one-liner
   log-labor version

@@ -192,7 +192,7 @@ func TestCollectAllWindowAndLeaks(t *testing.T) {
 	from := msOf(t, "2026-09-11T00:00:00+08:00")
 	out, warns := CollectAll([]Source{g, {Name: "broken", Format: "opencode-sqlite", Path: "/nonexistent/db"}},
 		func(Source) Window { return DefaultWindow() },
-		from, from+3*86_400_000, []string{"2026-09-11"})
+		from, from+3*86_400_000, []string{"2026-09-11"}, nil)
 	if len(warns) != 2 {
 		t.Fatalf("want broken-source + long-session warnings, got %v", warns)
 	}
@@ -217,7 +217,7 @@ func TestCollectAllWindowAndLeaks(t *testing.T) {
 	}
 	// the same session CAN appear on 9/13 when that day is requested
 	out, _ = CollectAll([]Source{g}, func(Source) Window { return DefaultWindow() },
-		from, from+3*86_400_000, []string{"2026-09-11", "2026-09-13"})
+		from, from+3*86_400_000, []string{"2026-09-11", "2026-09-13"}, nil)
 	if len(out) != 2 {
 		t.Fatalf("want one row per day for s1, got %+v", out)
 	}
@@ -320,6 +320,79 @@ func TestCollectOpencodeV2AndFallback(t *testing.T) {
 	}
 	if len(ss) != 0 {
 		t.Fatalf("zero-row day must return no sessions, got %+v", ss)
+	}
+}
+
+func TestCompileExcludesAndMatch(t *testing.T) {
+	reps, err := CompileExcludes([]string{"job-seeking", `求职|interview`})
+	if err != nil || len(reps) != 2 {
+		t.Fatalf("CompileExcludes: %v, %d", err, len(reps))
+	}
+	if _, err := CompileExcludes([]string{"ok", "("}); err == nil || !strings.Contains(err.Error(), `bad exclude pattern "("`) {
+		t.Errorf("bad pattern must fail the whole set loudly: %v", err)
+	}
+	if _, err := CompileExcludes(nil); err != nil {
+		t.Errorf("no patterns = no excludes, not an error: %v", err)
+	}
+
+	work := Session{Dir: "/Users/x/projects/NWi", Title: "Reduce noisy ruff output"}
+	if MatchExcluded(reps, work) {
+		t.Error("work session must survive the filter")
+	}
+	// basename hit …
+	if !MatchExcluded(reps, Session{Dir: "/Users/x/projects/job-seeking", Title: "anything"}) {
+		t.Error("project basename match must exclude")
+	}
+	// … title hit (personal content under an innocent dir) …
+	if !MatchExcluded(reps, Session{Dir: "/Users/x/projects/NWi", Title: "AI 工程师求职面试准备"}) {
+		t.Error("title match must exclude")
+	}
+	// … and a clean session with an empty dir is kept (never a blanket match)
+	if MatchExcluded(reps, Session{Title: "fix webhook retry"}) {
+		t.Error("clean session with empty dir must survive")
+	}
+	if MatchExcluded(nil, Session{Dir: "/p/job-seeking", Title: "求职"}) {
+		t.Error("nil excludes = filter off")
+	}
+}
+
+func TestCollectAllExcludes(t *testing.T) {
+	root := t.TempDir()
+	mk := func(name string, lines ...string) {
+		mustWrite(t, filepath.Join(root, name), strings.Join(lines, "\n")+"\n")
+	}
+	day := "2026-09-11"
+	mk("work.jsonl",
+		`{"ts":"2026-09-11T10:00:00+08:00","project":"/p/NWi","sid":"w1","what":"real work"}`)
+	mk("personal.jsonl",
+		`{"ts":"2026-09-11T11:00:00+08:00","project":"/p/job-seeking/leetcode","sid":"p1","what":"drill"}`,
+		`{"ts":"2026-09-11T12:00:00+08:00","project":"/p/NWi","sid":"p2","what":"求职简历项目筛选"}`)
+	g := Source{Name: "g", Format: "jsonl-generic", Path: root,
+		TimestampField: "ts", CwdField: "project", SessionField: "sid", TitleField: "what"}
+	from := msOf(t, day+"T00:00:00+08:00")
+	reps, err := CompileExcludes([]string{"job-seeking|leetcode|求职"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, warns := CollectAll([]Source{g}, func(Source) Window { return DefaultWindow() },
+		from, from+86_400_000, []string{day}, reps)
+	if len(out) != 1 || out[0].Title != "real work" {
+		t.Fatalf("excludes must drop the 2 personal sessions, keep work: %+v", out)
+	}
+	found := false
+	for _, w := range warns {
+		if strings.Contains(w, "已按排除规则过滤 2 个会话") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("dropped count must be reported once: %v", warns)
+	}
+	// filter off → everything back
+	out, _ = CollectAll([]Source{g}, func(Source) Window { return DefaultWindow() },
+		from, from+86_400_000, []string{day}, nil)
+	if len(out) != 3 {
+		t.Fatalf("nil excludes must keep all 3 sessions, got %d", len(out))
 	}
 }
 

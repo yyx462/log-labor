@@ -20,7 +20,7 @@ if [ -n "${LOG_LABOR_VERSION:-}" ]; then
 else
   VERSION="$(curl -fsSL --max-time 10 https://api.github.com/repos/yyx462/AutoWecom-plugin/releases/latest 2>/dev/null \
     | sed -n 's/.*"tag_name": *"log-labor-\(v[0-9.]*\)".*/\1/p' || true)"
-  VERSION="${VERSION:-v0.1.8}"
+  VERSION="${VERSION:-v0.1.9}"
 fi
 BIN_DIR="${LOG_LABOR_BIN_DIR:-$HOME/.local/bin}"
 RELEASES="https://github.com/yyx462/AutoWecom-plugin/releases"
