@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,9 +182,10 @@ func Collect(s Source, win Window, fromMs, toMs int64) ([]Session, error) {
 
 // CollectAll — run every source with ITS effective window (resolved by
 // the caller), merge, drop rows for days outside the requested set,
+// apply the exclusion rules (personal work: never reaches the sheet),
 // apply the ≥72h long-session rule (warn once per session), sort by
 // start. Per-source errors degrade to a warning line, never abort.
-func CollectAll(srcs []Source, win func(Source) Window, fromMs, toMs int64, days []string) ([]Session, []string) {
+func CollectAll(srcs []Source, win func(Source) Window, fromMs, toMs int64, days []string, excludes []*regexp.Regexp) ([]Session, []string) {
 	want := map[string]bool{}
 	for _, d := range days {
 		want[d] = true
@@ -191,6 +193,7 @@ func CollectAll(srcs []Source, win func(Source) Window, fromMs, toMs int64, days
 	var out []Session
 	var warns []string
 	longSeen := map[string]bool{}
+	excluded := 0
 	for _, s := range srcs {
 		w := win(s)
 		ss, err := Collect(s, w, fromMs, toMs)
@@ -202,6 +205,10 @@ func CollectAll(srcs []Source, win func(Source) Window, fromMs, toMs int64, days
 			ss[i].Source = s.Name
 			if !want[ss[i].Day] {
 				continue // fetch-range padding, not a requested day
+			}
+			if MatchExcluded(excludes, ss[i]) {
+				excluded++
+				continue
 			}
 			if time.Duration(ss[i].Span)*time.Millisecond >= LongSession {
 				key := fmt.Sprintf("%s|%s|%s|%d", s.Name, ss[i].Dir, ss[i].Title, ss[i].Span)
@@ -219,8 +226,38 @@ func CollectAll(srcs []Source, win func(Source) Window, fromMs, toMs int64, days
 			out = append(out, ss[i])
 		}
 	}
+	if excluded > 0 {
+		warns = append(warns, fmt.Sprintf("已按排除规则过滤 %d 个会话 (daily exclude)", excluded))
+	}
 	sort.SliceStable(out, func(a, b int) bool { return out[a].Start < out[b].Start })
 	return out, warns
+}
+
+// CompileExcludes — compile the config's exclude regexes; one bad
+// pattern fails the WHOLE set (callers abort loudly — a silently
+// ignored rule could leak personal sessions onto the work sheet).
+func CompileExcludes(patterns []string) ([]*regexp.Regexp, error) {
+	var reps []*regexp.Regexp
+	for _, p := range patterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("bad exclude pattern %q: %v", p, err)
+		}
+		reps = append(reps, re)
+	}
+	return reps, nil
+}
+
+// MatchExcluded — a session is excluded when ANY pattern matches its
+// project dir basename, full dir, or title.
+func MatchExcluded(excludes []*regexp.Regexp, s Session) bool {
+	base := filepath.Base(s.Dir)
+	for _, re := range excludes {
+		if re.MatchString(base) || (s.Dir != "" && re.MatchString(s.Dir)) || re.MatchString(s.Title) {
+			return true
+		}
+	}
+	return false
 }
 
 // CollectOpencode — sqlite via the sqlite3 CLI (zero Go deps,

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,70 @@ import (
 	"git.sh.nint.com/ying.yuxiang/AutoWecom-plugin/log-labor/internal/record"
 	"git.sh.nint.com/ying.yuxiang/AutoWecom-plugin/log-labor/internal/sources"
 )
+
+// TestDailyExcludeRoundTrip — list|add|remove against an isolated
+// XDG_CONFIG_HOME (config.Path honors it), plus the loud-fail on a bad
+// regex and compileConfigExcludes wiring.
+func TestDailyExcludeRoundTrip(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "log-labor")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	seed := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(seed, []byte(`{"endpoint":"https://x","profile":{"fields":{}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dailyExclude([]string{"add", "job-seeking", "求职|interview"}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	c, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Daily.Excludes) != 2 || c.Daily.Excludes[0] != "job-seeking" {
+		t.Errorf("rules not saved: %v", c.Daily.Excludes)
+	}
+	// duplicate add must not grow the list
+	if err := dailyExclude([]string{"add", "job-seeking"}); err != nil {
+		t.Fatalf("dup add: %v", err)
+	}
+	if c, _ = config.Load(); len(c.Daily.Excludes) != 2 {
+		t.Errorf("dup add grew the list: %v", c.Daily.Excludes)
+	}
+	// a bad regex never reaches the config
+	if err := dailyExclude([]string{"add", "("}); err == nil {
+		t.Error("bad regex must be rejected at add time")
+	}
+	// remove one
+	if err := dailyExclude([]string{"remove", "job-seeking"}); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if c, _ = config.Load(); len(c.Daily.Excludes) != 1 || c.Daily.Excludes[0] != "求职|interview" {
+		t.Errorf("remove left the wrong rules: %v", c.Daily.Excludes)
+	}
+	// unknown rule → exit-2
+	if err := dailyExclude([]string{"remove", "nope"}); err == nil {
+		t.Error("removing an absent rule must error")
+	}
+	// and the cmd-side compile honors what's stored
+	reps, err := compileConfigExcludes(c)
+	if err != nil || len(reps) != 1 {
+		t.Errorf("compileConfigExcludes: %v, %d", err, len(reps))
+	}
+	if reps2, err := compileConfigExcludes(nil); err != nil || reps2 != nil {
+		t.Errorf("nil config = no excludes: %v, %v", reps2, err)
+	}
+	// a POISONED stored pattern must fail collect loudly (never leak)
+	if err := os.WriteFile(seed, []byte(`{"endpoint":"https://x","profile":{"fields":{}},"daily":{"excludes":["("]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = config.Load()
+	if _, err := compileConfigExcludes(c); err == nil {
+		t.Error("poisoned exclude pattern must fail compilation loudly")
+	}
+}
 
 func TestParseTotal(t *testing.T) {
 	cases := map[string]float64{

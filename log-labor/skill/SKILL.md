@@ -233,6 +233,13 @@ session logs needs a one-time registration — the agent does this itself:
 5. Harnesses with NO durable transcripts (Cursor, Trae): those sessions
    can't be collected — ask the user what they did there and merge it
    into the same fit.
+6. Personal work that must NEVER reach the sheet (求职, job hunting,
+   private repos): register regex rules and they drop from EVERY
+   digest — matched against project dir basename, full dir, and title:
+   `log-labor daily exclude add 'job-seeking|leetcode' '求职|interview'`
+   List: `daily exclude list`; drop a rule: `daily exclude remove <re>`.
+   A matched session costs a one-line ⚠ notice, nothing more. Draft fit
+   rows ONLY from what survived the filter — the sheet is work labor.
 
 Long sessions are an anti-pattern: a session alive ≥72h cannot be
 attributed to days honestly, so collect EXCLUDES it with a ⚠ line —
@@ -255,6 +262,3 @@ log-labor skill install   # this skill, for every agent on the machine
 
 If `log-labor` is missing: re-run the one-liner (fetches the release
 binary) or build from source (`cd log-labor && go build ./cmd/log-labor`).
-
-<!-- log-labor:dev begin (managed by `log-labor skill` — do not edit) -->
-<!-- log-labor end -->

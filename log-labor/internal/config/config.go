@@ -44,12 +44,16 @@ type Defaults struct {
 // "on by default", so the on-disk flag is a pointer and missing = on.
 func (d Defaults) MirrorDue() bool { return d.DueMirror == nil || *d.DueMirror }
 
-// Daily — the global default work window for `daily collect` (+08).
+// Daily — the global default work window for `daily collect` (+08),
+// plus the exclusion rules: regexes matched against each session's
+// project dir (full path AND basename) and title; any match drops the
+// session from every digest — personal work never reaches the sheet.
 // Empty strings mean the built-in default 09:00–22:00; a Source may
 // override either edge per harness (night shifts etc.).
 type Daily struct {
-	WindowStart string `json:"window_start,omitempty"` // HH:MM, default 09:00
-	WindowEnd   string `json:"window_end,omitempty"`   // HH:MM, default 22:00
+	WindowStart string   `json:"window_start,omitempty"` // HH:MM, default 09:00
+	WindowEnd   string   `json:"window_end,omitempty"`   // HH:MM, default 22:00
+	Excludes    []string `json:"excludes,omitempty"`     // regexes; see `daily exclude`
 }
 
 // Config — the on-disk document.

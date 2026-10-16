@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -35,8 +36,10 @@ func cmdDaily(args []string) error {
 		return dailyFit(args[1:])
 	case "set-window":
 		return dailySetWindow(args[1:])
+	case "exclude":
+		return dailyExclude(args[1:])
 	default:
-		return exitError{code: 2, msg: fmt.Sprintf("unknown daily verb %q — want collect|sources|fit|set-window", args[0])}
+		return exitError{code: 2, msg: fmt.Sprintf("unknown daily verb %q — want collect|sources|fit|set-window|exclude", args[0])}
 	}
 }
 
@@ -159,13 +162,17 @@ func dailyCollect(args []string) error {
 	if len(all) == 0 {
 		return exitError{code: 2, msg: "no session stores found — register one: `log-labor daily sources add`"}
 	}
+	excludes, err := compileConfigExcludes(c)
+	if err != nil {
+		return exitError{code: 2, msg: err.Error()}
+	}
 	ss, warns := sources.CollectAll(all, func(s sources.Source) sources.Window {
 		w, err := effectiveWindow(f.val("window"), s, c)
 		if err != nil {
 			w = sources.DefaultWindow()
 		}
 		return w
-	}, fromMs, toMs, days)
+	}, fromMs, toMs, days, excludes)
 	perDay := map[string][]sources.Session{}
 	projects := map[string]bool{}
 	for _, r := range ss {
@@ -353,8 +360,12 @@ func dailySources(args []string) error {
 		if err != nil {
 			return exitError{code: 2, msg: err.Error()}
 		}
+		excludes, xcErr := compileConfigExcludes(c)
+		if xcErr != nil {
+			return exitError{code: 2, msg: xcErr.Error()}
+		}
 		ss, warns := sources.CollectAll([]sources.Source{*target},
-			func(sources.Source) sources.Window { return win }, fromMs, toMs, days)
+			func(sources.Source) sources.Window { return win }, fromMs, toMs, days, excludes)
 		for _, w := range warns {
 			fmt.Println("  ⚠ " + w)
 		}
@@ -369,6 +380,117 @@ func dailySources(args []string) error {
 	default:
 		return exitError{code: 2, msg: fmt.Sprintf("unknown sources verb %q — want list|add|remove|test", verb)}
 	}
+}
+
+// compileConfigExcludes — the config's exclude regexes, compiled.
+// nil config → no excludes. A bad stored pattern fails loud: the whole
+// point of the filter is that personal work never leaks onto the sheet.
+func compileConfigExcludes(c *config.Config) ([]*regexp.Regexp, error) {
+	if c == nil {
+		return nil, nil
+	}
+	return sources.CompileExcludes(c.Daily.Excludes)
+}
+
+// dailyExclude — list|add|remove: regex rules dropping sessions from
+// EVERY digest (matched against project dir basename, full dir, and
+// title). The point: personal work (求职 etc.) never reaches the
+// sheet. One bad pattern poisons collect — `remove` accepts the raw
+// pattern to delete it.
+func dailyExclude(args []string) error {
+	if len(args) == 0 {
+		return exitError{code: 2, msg: "exclude needs a verb: list|add|remove"}
+	}
+	c, err := config.MustLoad()
+	if err != nil {
+		return err
+	}
+	verb, rest := args[0], args[1:]
+	switch verb {
+	case "list":
+		if len(c.Daily.Excludes) == 0 {
+			fmt.Println("(no exclude rules — every collected session reaches the sheet; add with `daily exclude add`)")
+			return nil
+		}
+		for _, p := range c.Daily.Excludes {
+			fmt.Println("  " + p)
+		}
+		return nil
+	case "add":
+		f, err := parseFlags(rest)
+		if err != nil {
+			return err
+		}
+		pats := append(f.args, f.val("re"))
+		pats = append(pats, f.val("pattern"))
+		pats = nonEmpty(pats)
+		if len(pats) == 0 {
+			return exitError{code: 2, msg: "add needs at least one regex (bare arg or --re)"}
+		}
+		for _, p := range pats {
+			if _, err := regexp.Compile(p); err != nil {
+				return exitError{code: 2, msg: fmt.Sprintf("bad regex %q: %v", p, err)}
+			}
+		}
+		added := 0
+		for _, p := range pats {
+			dup := false
+			for _, old := range c.Daily.Excludes {
+				if old == p {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				c.Daily.Excludes = append(c.Daily.Excludes, p)
+				added++
+			}
+		}
+		if err := c.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("saved %d rule(s) — matched sessions (project basename, dir, or title) are dropped from every digest; list: `daily exclude list`\n", added)
+		return nil
+	case "remove":
+		f, err := parseFlags(rest)
+		if err != nil {
+			return err
+		}
+		pats := append(f.args, f.val("re"))
+		kept := c.Daily.Excludes[:0]
+		removed := 0
+		for _, old := range c.Daily.Excludes {
+			drop := false
+			for _, p := range nonEmpty(pats) {
+				if old == p {
+					drop = true
+					break
+				}
+			}
+			if drop {
+				removed++
+			} else {
+				kept = append(kept, old)
+			}
+		}
+		if removed == 0 {
+			return exitError{code: 2, msg: "no such rule — see `daily exclude list`"}
+		}
+		c.Daily.Excludes = kept
+		return c.Save()
+	default:
+		return exitError{code: 2, msg: fmt.Sprintf("unknown exclude verb %q — want list|add|remove", verb)}
+	}
+}
+
+func nonEmpty(in []string) []string {
+	var out []string
+	for _, s := range in {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // dailySetWindow — the global default work window for `daily collect`
