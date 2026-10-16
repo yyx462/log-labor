@@ -31,6 +31,14 @@ plugin of the new generation.
   stays "pending" forever, watch the GitHub run. npm publishes as
   `@yyx462/*`. Bump the pinned fallback in `install.sh`/`install.ps1`
   when tagging (dynamic latest-resolution falls back to the pin).
+- CI npm publish is BROKEN (NPM_TOKEN → ENEEDAUTH, Gitea issue #45):
+  when the run fails there, publish from the repo with
+  `log-labor/npm/publish.sh vX.Y.Z`, each `npm publish` under a pty
+  (`script -q <log> npm publish --access public`) so npm's 2FA web-auth
+  prints its URL — ONE browser approval, the session carries for the
+  remaining packages. npm publish is ASYNC: `+ pkg@ver` prints before
+  the package is visible on the registry (minutes) — a 404 right after
+  is NOT a publish failure.
 
 ## Layout
 
